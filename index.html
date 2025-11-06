@@ -1,12 +1,333 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title><Digital-oct10th></Digital-oct10th></title>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Snail Shooter</title>
+    <style>
+        :root{--bg:#b6f0d1;--panel:#ffffffbb;--accent:#6b8f4a}
+        html,body{height:100%;margin:0;font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial}
+        body{display:flex;align-items:center;justify-content:center;background:linear-gradient(180deg,var(--bg),#89d6a8);}
+        #gameWrap{width:100%;max-width:900px;margin:24px;position:relative}
+        canvas{display:block;width:100%;height:auto;background:linear-gradient(#8ee0aa,#4ea86a);border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.15)}
+        .hud{position:absolute;left:12px;top:12px;padding:8px 12px;border-radius:10px;background:var(--panel);backdrop-filter:blur(4px);}
+        .hud small{display:block;color:#2b3b20}
+        .controls{position:absolute;right:12px;top:12px;padding:8px 12px;border-radius:10px;background:var(--panel);text-align:right}
+        .btn{border:none;background:var(--accent);color:white;padding:6px 10px;border-radius:8px;cursor:pointer;font-weight:600}
+        .footer{margin-top:10px;color:#123; font-size:13px}
+        @media (max-width:480px){.hud{font-size:13px}.controls{font-size:13px}}
+    </style>
 </head>
 <body>
-    <h1>Hello,World!</h1>
-</h1>
+    <div id="gameWrap">
+        <canvas id="game" width="900" height="600"></canvas>
+        <div class="hud">
+            <div id="score">Score: 0</div>
+            <small id="lives">Lives: 3</small>
+        </div>
+        <div class="controls">
+            <button id="startBtn" class="btn">Start</button>
+            <button id="muteBtn" class="btn" style="background:#444;margin-left:6px">Mute</button>
+            <div class="footer">Move: ← → or drag • Shoot: Space / tap</div>
+    </div>
+    <!-- Audio assets (place files in project root) -->
+    <audio id="sfxScream1" src="scream-1.1.mp3" preload="auto"></audio>
+    <audio id="sfxScream2" src="scream-2.2.mp3" preload="auto"></audio>
+    <audio id="sfxPew" src="pew-pwe.mp3" preload="auto"></audio>
+    </div>
+
+    <script>
+    // Simple snail shooter game
+    (function(){
+        const canvas = document.getElementById('game');
+        const ctx = canvas.getContext('2d');
+    // keep internal resolution fixed
+    const W = 900, H = 600;
+    // world is larger than the viewport
+    const worldW = 2400, worldH = 1400;
+    canvas.width = W; canvas.height = H;
+
+        let score = 0, lives = 3, running = false, muted = false;
+        const scoreEl = document.getElementById('score');
+        const livesEl = document.getElementById('lives');
+        const startBtn = document.getElementById('startBtn');
+        const muteBtn = document.getElementById('muteBtn');
+
+        // Input
+        const input = {left:false,right:false,shoot:false,x:W/2};
+        window.addEventListener('keydown', e=>{
+            if(e.code==='ArrowLeft') input.left=true;
+            if(e.code==='ArrowRight') input.right=true;
+            if(e.code==='Space') input.shoot=true;
+            // jump keys
+            if(e.code==='ArrowUp' || e.code==='KeyW') doJump();
+        });
+        window.addEventListener('keyup', e=>{ if(e.code==='ArrowLeft') input.left=false; if(e.code==='ArrowRight') input.right=false; if(e.code==='Space') input.shoot=false; });
+
+        // Touch / mouse drag to move, tap to shoot, double-tap to jump
+        let dragging=false;
+        let lastTap = 0;
+        canvas.addEventListener('pointerdown', e=>{
+            const now = Date.now();
+            // detect quick double-tap for jump
+            if(now - lastTap < 320){ doJump(); }
+            lastTap = now;
+            dragging=true; input.shoot=true; input.x = localX(e);
+        });
+        canvas.addEventListener('pointermove', e=>{ if(dragging) input.x = localX(e); });
+        canvas.addEventListener('pointerup', e=>{ dragging=false; input.shoot=false; });
+    function localX(e){ const rect = canvas.getBoundingClientRect(); return cam.x + (e.clientX - rect.left) * (W/rect.width); }
+
+        // Entities
+        const bullets = [];
+        const enemies = [];
+        const particles = [];
+
+        const groundY = worldH - 80;
+        const gravity = 0.6;
+
+        // camera follows the snail within the larger world
+        const cam = {x:0,y:0,w:W,h:H};
+
+        const snailImg = new Image();
+        snailImg.src = 'snail.png';
+        const defaultSnailWidth = 140;
+        const defaultSnailHeight = 105;
+
+        const snail = {
+            x: worldW/2,
+            y: groundY,
+            vy: 0,
+            width: defaultSnailWidth,
+            height: defaultSnailHeight,
+            speed: 5,
+            cooldown: 0,
+            onGround: true,
+            draw(){
+                const w = this.width;
+                const h = this.height;
+                const drawX = this.x - w/2;
+                const drawY = this.y - h;
+                // drop shadow
+                ctx.fillStyle = 'rgba(0,0,0,0.18)';
+                ctx.beginPath();
+                ctx.ellipse(this.x, this.y - 4, w*0.45, Math.max(8, h*0.18), 0, 0, Math.PI*2);
+                ctx.fill();
+                if(snailImg.complete && snailImg.naturalWidth){
+                    ctx.drawImage(snailImg, drawX, drawY, w, h);
+                }else{
+                    // fallback simple shell while sprite loads
+                    ctx.save();
+                    ctx.translate(this.x, this.y - h/2);
+                    const r = Math.min(w,h)/2.5;
+                    ctx.fillStyle = '#8dbf5a'; ctx.beginPath(); ctx.ellipse(0,0,r*1.05,r*0.7,0,0,Math.PI*2); ctx.fill();
+                    ctx.strokeStyle = '#5a7a3a'; ctx.lineWidth=4; ctx.beginPath(); ctx.arc(-6,-2,12,0,Math.PI*2); ctx.stroke();
+                    ctx.restore();
+                }
+            }
+        };
+
+        snailImg.onload = () => {
+            const ratio = snailImg.naturalHeight / snailImg.naturalWidth || 1;
+            snail.width = defaultSnailWidth;
+            snail.height = defaultSnailWidth * ratio;
+        };
+
+        // Jump action
+        function doJump(){
+            if(!running) return; // only during game
+            if(snail.onGround){
+                snail.vy = -12;
+                snail.onGround = false;
+                playJumpSound();
+            }
+        }
+
+        function spawnEnemy(){
+            const w = 34 + Math.random()*26; const h = 24 + Math.random()*18;
+            const x = Math.random()*(worldW-80)+40; const y = -40 + Math.random()*80 - 40;
+            const vx = (Math.random()-0.5)*1.8; const vy = 1.3 + Math.random()*1.6;
+            enemies.push({x,y,w,h,vx,vy,rot:Math.random()*Math.PI*2});
+        }
+
+        function spawnEnemyWave(){
+            const desired = enemies.length > 24 ? 1 : 1 + Math.floor(Math.random()*3);
+            for(let i=0;i<desired;i++) spawnEnemy();
+        }
+
+        function shoot(){
+            const muzzleY = snail.y - (snail.height ? snail.height * 0.7 : 28);
+            const b = {x: snail.x, y: muzzleY, r:6, vy:-8, life:120};
+            bullets.push(b);
+            playShootSound();
+        }
+
+            function spawnParticles(x,y,color,count=24){
+            for(let i=0;i<count;i++){
+                const a = Math.random()*Math.PI*2; const s = 1+Math.random()*3;
+                particles.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,life:60,clr:color,r:2+Math.random()*3});
+            }
+        }
+
+        // Shared sound effects pool (two MP3s reused for multiple events)
+        const sfx = {
+            scream1: document.getElementById('sfxScream1'),
+            scream2: document.getElementById('sfxScream2'),
+            pew: document.getElementById('sfxPew')
+        };
+
+        function playSfx(key, volume = 1){
+            if(muted) return;
+            const base = sfx[key];
+            if(!base) return;
+            try{
+                const node = base.cloneNode(true);
+                node.volume = volume;
+                node.play().catch(()=>{});
+            }catch(err){ /* ignore play errors */ }
+        }
+
+    function playShootSound(){ playSfx('pew', 0.75); }
+        function playHitSound(){ playSfx('scream2', 0.8); }
+        function playJumpSound(){ playSfx('scream1', 0.85); }
+        function playEnemyMoveSound(){ playSfx('scream2', 0.5); }
+
+        function rectCircleColl(rX,rY,rW,rH,cx,cy,cr){
+            // approximate circle-rectangle collision
+            const closestX = Math.max(rX, Math.min(cx, rX + rW));
+            const closestY = Math.max(rY, Math.min(cy, rY + rH));
+            const dx = cx - closestX; const dy = cy - closestY;
+            return (dx*dx + dy*dy) < (cr*cr);
+        }
+
+    let enemyTimer = 0;
+    let enemyMoveSoundTimer = 0;
+    let lastTime = 0;
+
+        function update(dt){
+            // move snail (horizontal)
+            if(typeof input.x === 'number') snail.x += (input.x - snail.x) * 0.2; // smooth follow (world coords)
+            if(input.left) snail.x -= snail.speed;
+            if(input.right) snail.x += snail.speed;
+            const halfSnail = snail.width/2;
+            snail.x = Math.max(halfSnail, Math.min(worldW - halfSnail, snail.x));
+
+            // vertical physics (jump/gravity)
+            if(!snail.onGround){ snail.vy += gravity * dt; snail.y += snail.vy * dt; }
+            // landing
+            if(snail.y >= groundY){ snail.y = groundY; snail.vy = 0; snail.onGround = true; }
+
+            // camera follows snail, clamped to world
+            cam.x = Math.max(0, Math.min(worldW - cam.w, snail.x - cam.w/2));
+            cam.y = Math.max(0, Math.min(worldH - cam.h, snail.y - cam.h/2));
+
+            // shooting cooldown
+            snail.cooldown = Math.max(0, snail.cooldown - dt);
+            if(input.shoot && snail.cooldown===0){ shoot(); snail.cooldown = 12; }
+
+            // bullets
+            for(let i=bullets.length-1;i>=0;i--){ const b=bullets[i]; b.y += b.vy; b.life -= 1; if(b.y < -60 || b.y > worldH+60 || b.x < -60 || b.x > worldW+60 || b.life<=0) bullets.splice(i,1); }
+
+            // spawn enemies
+            enemyTimer -= dt;
+            if(enemyTimer <= 0){
+                spawnEnemyWave();
+                enemyTimer = 25 + Math.random()*35; // quicker, varied waves
+            }
+
+            // ambient movement sound for enemies
+            enemyMoveSoundTimer = Math.max(0, enemyMoveSoundTimer - dt);
+            if(enemies.length && enemyMoveSoundTimer <= 0){
+                playEnemyMoveSound();
+                enemyMoveSoundTimer = 90;
+            }
+
+            // update enemies (world coords)
+            for(let i=enemies.length-1;i>=0;i--){ const e = enemies[i]; e.x += e.vx; e.y += e.vy; e.rot += 0.02;
+                if(e.y > worldH+80){ enemies.splice(i,1); lives -= 1; livesEl.textContent = 'Lives: '+lives; if(lives<=0) endGame(); }
+            }
+
+            // bullets vs enemies
+            for(let i=enemies.length-1;i>=0;i--){ const e=enemies[i]; for(let j=bullets.length-1;j>=0;j--){ const b=bullets[j]; if(rectCircleColl(e.x-e.w/2,e.y-e.h/2,e.w,e.h,b.x,b.y,b.r)){ // hit
+                // play hit sound, spawn particles and score
+                playHitSound();
+                spawnParticles(b.x,b.y,'#fff',18);
+                enemies.splice(i,1); bullets.splice(j,1); score += 10; scoreEl.textContent = 'Score: '+score; break;
+              } }
+            }
+
+            // particles
+            for(let i=particles.length-1;i>=0;i--){ const p=particles[i]; p.x += p.vx; p.y += p.vy; p.vy += 0.08; p.life -= 1; if(p.life<=0) particles.splice(i,1); }
+        }
+
+        function draw(){
+            // clear screen
+            ctx.clearRect(0,0,W,H);
+
+            // world -> apply camera transform
+            ctx.save();
+            ctx.translate(-cam.x, -cam.y);
+
+            // background hills (positioned in world space)
+            ctx.fillStyle = '#75c07a'; ctx.beginPath(); ctx.ellipse(worldW*0.2,worldH+40,420,120,0,Math.PI,Math.PI*2); ctx.fill();
+            ctx.beginPath(); ctx.ellipse(worldW*0.8,worldH+10,320,90,0,Math.PI,Math.PI*2); ctx.fill();
+
+            // snail (in world coords)
+            snail.draw();
+
+            // bullets (world coords)
+            for(const b of bullets){ ctx.fillStyle = '#0b2'; ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,Math.PI*2); ctx.fill(); ctx.fillStyle='#2a2'; ctx.fillRect(b.x-1,b.y-3,2,6); }
+
+            // enemies (birds) in world coords
+            for(const e of enemies){ ctx.save(); ctx.translate(e.x,e.y); ctx.rotate(Math.sin(e.rot)*0.12);
+                // body
+                ctx.fillStyle = '#ffc857'; ctx.beginPath(); ctx.ellipse(0,0,e.w/2,e.h/2,0,0,Math.PI*2); ctx.fill();
+                // wing
+                ctx.fillStyle = '#ffb703'; ctx.beginPath(); ctx.ellipse(-e.w*0.15,0,e.w*0.28,e.h*0.38,0,0,Math.PI*2); ctx.fill();
+                // eye
+                ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(e.w*0.25,-e.h*0.08,4,0,Math.PI*2); ctx.fill(); ctx.fillStyle='#000'; ctx.beginPath(); ctx.arc(e.w*0.25,-e.h*0.08,1.6,0,Math.PI*2); ctx.fill();
+                ctx.restore(); }
+
+            // particles
+            for(const p of particles){ ctx.fillStyle = p.clr || '#fff'; ctx.globalAlpha = Math.max(0, p.life/60); ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,Math.PI*2); ctx.fill(); ctx.globalAlpha = 1; }
+
+            ctx.restore();
+
+            // overlay text when paused (screen coords)
+            if(!running){ ctx.fillStyle='rgba(0,0,0,0.2)'; ctx.fillRect(0,0,W,H); ctx.fillStyle='#fff'; ctx.font='28px system-ui'; ctx.textAlign='center'; ctx.fillText('Press Start to play',W/2,H/2); }
+        }
+
+        function loop(t){
+            if(!lastTime) lastTime = t; const dt = Math.min(60, (t-lastTime)/16.6667); lastTime = t; if(running) update(dt);
+            draw(); requestAnimationFrame(loop);
+        }
+
+        function reset(){
+            score=0;
+            lives=3;
+            bullets.length=0;
+            enemies.length=0;
+            particles.length=0;
+            snail.x = worldW/2;
+            snail.y = groundY;
+            snail.vy = 0;
+            snail.onGround = true;
+            scoreEl.textContent='Score: 0';
+            livesEl.textContent='Lives: 3';
+        }
+
+        function startGame(){ reset(); running=true; startBtn.textContent='Restart'; }
+        function endGame(){ running=false; startBtn.textContent='Play Again'; }
+
+        startBtn.addEventListener('click', ()=>{ startGame(); });
+        muteBtn.addEventListener('click', ()=>{ muted=!muted; muteBtn.textContent = muted ? 'Unmute' : 'Mute'; });
+
+        // kick off loop
+        requestAnimationFrame(loop);
+
+        // expose simple debug spawn
+        window.__spawnEnemy = spawnEnemy;
+    })();
+    </script>
 </body>
 </html>
